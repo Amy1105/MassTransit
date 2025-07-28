@@ -10,6 +10,7 @@ namespace MassTransit.TestFramework
 
     /// <summary>
     /// A bus text fixture includes a single bus instance with one or more receiving endpoints.
+    /// 总线文本夹具包含一个总线实例，该实例具有一个或多个接收端点。
     /// </summary>
     public abstract class BusTestFixture :
         AsyncTestFixture
