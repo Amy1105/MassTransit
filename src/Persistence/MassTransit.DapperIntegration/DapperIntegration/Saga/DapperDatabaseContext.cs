@@ -13,96 +13,49 @@ namespace MassTransit.DapperIntegration.Saga
 
     public class DapperDatabaseContext<TSaga> :
         DatabaseContext<TSaga>
+        where TSaga : class, ISaga
     {
         readonly SqlConnection _connection;
-        readonly SemaphoreSlim _inUse;
         readonly SqlTransaction _transaction;
 
         public DapperDatabaseContext(SqlConnection connection, SqlTransaction transaction)
         {
             _connection = connection;
             _transaction = transaction;
-            _inUse = new SemaphoreSlim(1);
         }
 
-        public async Task InsertAsync<T>(T instance, CancellationToken cancellationToken)
-            where T : class, ISaga
+        public Task InsertAsync(TSaga instance, CancellationToken cancellationToken)
         {
-            await _inUse.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                await _connection.InsertAsync(instance, _transaction).ConfigureAwait(false);
-            }
-            finally
-            {
-                _inUse.Release();
-            }
+            return _connection.InsertAsync(instance, _transaction);
         }
 
-        public async Task UpdateAsync<T>(T instance, CancellationToken cancellationToken)
-            where T : class, ISaga
+        public Task UpdateAsync(TSaga instance, CancellationToken cancellationToken)
         {
-            await _inUse.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                await _connection.UpdateAsync(instance, _transaction).ConfigureAwait(false);
-            }
-            finally
-            {
-                _inUse.Release();
-            }
+            return _connection.UpdateAsync(instance, _transaction);
         }
 
-        public async Task DeleteAsync<T>(T instance, CancellationToken cancellationToken)
-            where T : class, ISaga
+        public Task DeleteAsync(TSaga instance, CancellationToken cancellationToken)
         {
             var correlationId = instance?.CorrelationId ?? throw new ArgumentNullException(nameof(instance));
+            var sql = $"DELETE FROM {GetTableName()} WHERE CorrelationId = @correlationId";
 
-            await _inUse.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                await _connection.QueryAsync($"DELETE FROM {GetTableName<T>()} WHERE CorrelationId = @correlationId", new { correlationId }, _transaction)
-                    .ConfigureAwait(false);
-            }
-            finally
-            {
-                _inUse.Release();
-            }
+            return _connection.QueryAsync(sql, new { correlationId }, _transaction);
         }
 
-        public async Task<T> LoadAsync<T>(Guid correlationId, CancellationToken cancellationToken)
-            where T : class, ISaga
+        public Task<TSaga> LoadAsync(Guid correlationId, CancellationToken cancellationToken)
         {
-            await _inUse.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                return await _connection.QuerySingleOrDefaultAsync<T>(
-                    $"SELECT * FROM {GetTableName<T>()} WITH (UPDLOCK, ROWLOCK) WHERE CorrelationId = @correlationId",
-                    new { correlationId }, _transaction).ConfigureAwait(false);
-            }
-            finally
-            {
-                _inUse.Release();
-            }
+            var sql = $"SELECT * FROM {GetTableName()} WITH (UPDLOCK, ROWLOCK) WHERE CorrelationId = @correlationId";
+
+            return _connection.QuerySingleOrDefaultAsync<TSaga>(sql, new { correlationId }, _transaction);
         }
 
-        public async Task<IEnumerable<T>> QueryAsync<T>(Expression<Func<T, bool>> filterExpression, CancellationToken cancellationToken)
-            where T : class, ISaga
+        public Task<IEnumerable<TSaga>> QueryAsync(Expression<Func<TSaga, bool>> filterExpression, CancellationToken cancellationToken)
         {
-            var tableName = GetTableName<T>();
-
+            var tableName = GetTableName();
             var (whereStatement, parameters) = WhereStatementHelper.GetWhereStatementAndParametersFromExpression(filterExpression);
+            var sql = $"SELECT * FROM {tableName} WITH (UPDLOCK, ROWLOCK) {whereStatement}";
 
-            await _inUse.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                return await _connection.QueryAsync<T>($"SELECT * FROM {tableName} WITH (UPDLOCK, ROWLOCK) {whereStatement}", parameters, _transaction)
-                    .ConfigureAwait(false);
-            }
-            finally
-            {
-                _inUse.Release();
-            }
+            return _connection.QueryAsync<TSaga>(sql, parameters, _transaction);
         }
 
         public void Commit()
@@ -112,16 +65,15 @@ namespace MassTransit.DapperIntegration.Saga
 
         public ValueTask DisposeAsync()
         {
-            _inUse.Dispose();
             _transaction.Dispose();
             _connection.Dispose();
 
             return default;
         }
 
-        static string GetTableName<T>()
+        static string GetTableName()
         {
-            return typeof(T).GetCustomAttribute<TableAttribute>()?.Name ?? $"{typeof(T).Name}s";
+            return typeof(TSaga).GetCustomAttribute<TableAttribute>()?.Name ?? $"{typeof(TSaga).Name}s";
         }
     }
 }

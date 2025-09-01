@@ -44,7 +44,7 @@
 
                 ServiceBusException { Reason: ServiceBusFailureReason.ServiceCommunicationProblem } => true,
                 ServiceBusException { Reason: ServiceBusFailureReason.MessagingEntityNotFound } => true,
-                ServiceBusException { Reason: ServiceBusFailureReason.MessagingEntityDisabled } => true,
+                ServiceBusException { Reason: ServiceBusFailureReason.MessagingEntityDisabled } => false,
 
                 ServiceBusException { IsTransient: true } => false,
 
@@ -66,6 +66,7 @@
                 case ObjectDisposedException { ObjectName: "$cbs" }:
                 case ServiceBusException { Reason: ServiceBusFailureReason.MessageLockLost }:
                 case ServiceBusException { Reason: ServiceBusFailureReason.SessionLockLost }:
+                case ServiceBusException { Reason: ServiceBusFailureReason.MessagingEntityDisabled }:
                     // don't log those
                     break;
                 default:
@@ -166,7 +167,6 @@
                 LogContext.Error?.Log("Session Lock Lost: {InputAddress} {MessageId} {SequenceNumber} ({SessionId})", _context.InputAddress,
                     message.MessageId, message.SequenceNumber, message.SessionId);
 
-                await _context.ReceiveObservers.ReceiveFault(context, ex).ConfigureAwait(false);
                 throw;
             }
             catch (ServiceBusException ex) when (ex.Reason == ServiceBusFailureReason.MessageLockLost)
@@ -174,7 +174,6 @@
                 LogContext.Error?.Log("Message Lock Lost: {InputAddress} {MessageId} {SequenceNumber}", _context.InputAddress, message.MessageId,
                     message.SequenceNumber);
 
-                await _context.ReceiveObservers.ReceiveFault(context, ex).ConfigureAwait(false);
                 throw;
             }
             catch (OperationCanceledException)

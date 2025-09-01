@@ -2,6 +2,7 @@ namespace MassTransit.ActiveMqTransport.Configuration
 {
     using System;
     using System.Collections.Generic;
+    using System.Globalization;
     using System.Linq;
     using Apache.NMS;
 
@@ -73,6 +74,8 @@ namespace MassTransit.ActiveMqTransport.Configuration
 
         public abstract string NmsScheme { get; }
 
+        public abstract string FailoverConnectionSettingPrefix { get; }
+
         public string Host { get; }
         public int Port { get; set; }
         public string Username { get; set; }
@@ -106,13 +109,13 @@ namespace MassTransit.ActiveMqTransport.Configuration
                     .Select(failoverHost => new UriBuilder
                         {
                             Scheme = HostScheme,
-                            Host = failoverHost,
-                            Port = Port,
+                            Host = GetHostName(failoverHost),
+                            Port = GetPort(failoverHost, Port),
                             Query = failoverServerPart
                         }.Uri.ToString()
                     ));
                 //filter failover parameters only. Apache.NMS.ActiveMQ requires prefix "transport." for failover parameters
-                var failoverQueryPart = GetQueryString(kv => IsFailoverArgument(kv.Key), "transport.");
+                var failoverQueryPart = GetQueryString(kv => IsFailoverArgument(kv.Key), FailoverConnectionSettingPrefix);
                 return new Uri($"{FailoverScheme}:({failoverPart}){failoverQueryPart}");
             }
 
@@ -126,7 +129,14 @@ namespace MassTransit.ActiveMqTransport.Configuration
             if (TransportOptions.Count == 0)
                 return "";
 
-            var queryString = string.Join("&", TransportOptions.Where(predicate).Select(pair => $"{prefix}{pair.Key}={pair.Value}"));
+            var queryString = string.Join("&", TransportOptions.Where(predicate).Select(pair =>
+            {
+                if (pair.Key.StartsWith(prefix, StringComparison.InvariantCulture))
+                {
+                    return $"{pair.Key}={pair.Value}";
+                }
+                return $"{prefix}{pair.Key}={pair.Value}";
+            }));
 
             return $"?{queryString}";
         }
@@ -143,7 +153,33 @@ namespace MassTransit.ActiveMqTransport.Configuration
 
         static bool IsFailoverArgument(string key)
         {
-            return key.StartsWith("nested.", StringComparison.OrdinalIgnoreCase) || _failoverArguments.Contains(key);
+            return key.StartsWith("nested.", StringComparison.OrdinalIgnoreCase) || _failoverArguments.Any(f => key.EndsWith(f, StringComparison.InvariantCulture));
+        }
+
+        int GetPort(string host, int defaultPort)
+        {
+            //Parse the port from the host if it is specified, otherwise return the default port
+            if (string.IsNullOrEmpty(host))
+            {
+                return defaultPort;
+            }
+            var hostPort = host.Split(':');
+            if (hostPort.Length > 1 && int.TryParse(hostPort[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int port))
+            {
+                return port;
+            }
+            return defaultPort;
+        }
+
+        string GetHostName(string failoverHost)
+        {
+            if (string.IsNullOrEmpty(failoverHost))
+            {
+                throw new ArgumentNullException(nameof(failoverHost));
+            }
+
+            var hostPort = failoverHost.Split(':');
+            return hostPort[0];
         }
     }
 }

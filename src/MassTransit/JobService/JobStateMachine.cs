@@ -8,6 +8,7 @@ namespace MassTransit
     using Internals;
     using JobService.Messages;
     using JobService.Scheduling;
+    using Logging;
 
 
     public sealed class JobStateMachine :
@@ -176,12 +177,12 @@ namespace MassTransit
 
             During(Completed,
                 When(AttemptCompleted)
+                    .FinalizeJobAttempts()
                     .NotifyJobCompleted(),
                 When(AttemptStarted)
                     .Then(context => context.Saga.Started = context.Message.Timestamp)
                     .PublishJobStarted(),
                 When(JobCompleted)
-                    .FinalizeJobAttempts()
                     .IfElse(context => context.IsScheduledJob(),
                         scheduled => scheduled
                             .DetermineNextStartDate()
@@ -209,10 +210,12 @@ namespace MassTransit
                 When(AttemptCanceled)
                     .IfElse(context => string.Equals(context.Message.Reason, JobCancellationReasons.Shutdown, StringComparison.Ordinal),
                         shutdown => shutdown
+                            .Then(context => context.Saga.Reason = context.Message.GetCancellationReason())
                             .SendJobSlotReleased(JobSlotDisposition.Canceled)
                             .WaitForJobSlot(this),
                         other => other
-                            .PublishJobCanceled()
+                            .PublishJobCanceled(x => x.GetCancellationReason())
+                            .ClearNextStartDate()
                             .TransitionTo(Canceled)
                     )
             );
@@ -264,7 +267,8 @@ namespace MassTransit
             During([WaitingForSlot, WaitingToRetry],
                 When(CancelJob)
                     .Unschedule(JobSlotWaitElapsed)
-                    .PublishJobCanceled()
+                    .ClearNextStartDate()
+                    .PublishJobCanceled(x => x.GetCancellationReason())
                     .TransitionTo(Canceled)
             );
 
@@ -282,10 +286,13 @@ namespace MassTransit
 
             During(CancellationPending,
                 When(JobSlotAllocated)
+                    .ClearNextStartDate()
                     .TransitionTo(Canceled),
                 When(JobSlotUnavailable)
+                    .ClearNextStartDate()
                     .TransitionTo(Canceled),
                 When(AllocateJobSlotFaulted)
+                    .ClearNextStartDate()
                     .TransitionTo(Canceled)
             );
 
@@ -331,7 +338,7 @@ namespace MassTransit
                     .Finalize());
 
 
-            // Update recurring jobs, otherwise we're just going to any subsequent duplicate job submissions with a warning
+            // Update recurring jobs, otherwise ignore any duplicate job submissions with a warning
             DuringAny(
                 When(JobSubmitted)
                     .IfElse(context => context.IsScheduledJob(), x => x.UpdateRecurringJob(),
@@ -406,6 +413,21 @@ namespace MassTransit
 
     static class JobStateMachineBehaviorExtensions
     {
+        internal static string GetCancellationReason(this CancelJob message)
+        {
+            return string.IsNullOrWhiteSpace(message.Reason) ? JobCancellationReasons.CancellationRequested : message.Reason;
+        }
+
+        internal static string GetCancellationReason(this JobAttemptCanceled message)
+        {
+            return string.IsNullOrWhiteSpace(message.Reason) ? JobCancellationReasons.CancellationRequested : message.Reason;
+        }
+
+        internal static string GetCancellationReason(this CancelJobAttempt message)
+        {
+            return string.IsNullOrWhiteSpace(message.Reason) ? JobCancellationReasons.CancellationRequested : message.Reason;
+        }
+
         static Uri GetJobAttemptSagaAddress(this SagaConsumeContext<JobSaga> context)
         {
             return context.GetPayload<JobSagaSettings>().JobAttemptSagaEndpointAddress;
@@ -519,6 +541,15 @@ namespace MassTransit
             });
         }
 
+        public static EventActivityBinder<JobSaga, T> ClearNextStartDate<T>(this EventActivityBinder<JobSaga, T> binder)
+            where T : class
+        {
+            return binder.Then(context =>
+            {
+                context.Saga.NextStartDate = null;
+            });
+        }
+
         static void SetJobProperties(BehaviorContext<JobSaga, JobSubmitted> context)
         {
             if (context.Message.JobProperties is { Count: > 0 })
@@ -553,7 +584,6 @@ namespace MassTransit
                     context.Saga.RetryAttempt++;
                 })
                 .RequestJobSlot(machine);
-            ;
         }
 
         public static EventActivityBinder<JobSaga, T> ClearJobState<T>(this EventActivityBinder<JobSaga, T> binder)
@@ -621,7 +651,7 @@ namespace MassTransit
                 {
                     JobId = context.Saga.CorrelationId,
                     AttemptId = context.Saga.AttemptId,
-                    Reason = context.Message.Reason ?? JobCancellationReasons.CancellationRequested
+                    Reason = context.Message.GetCancellationReason()
                 });
         }
 
@@ -638,7 +668,8 @@ namespace MassTransit
             return binder
                 .ClearJobState()
                 .Schedule(machine.JobSlotWaitElapsed, context => new JobSlotWaitElapsedEvent { JobId = context.Saga.CorrelationId },
-                    context => context.Saga.NextStartDate.Value.DateTime)
+                    context => context.Saga.NextStartDate.Value.DateTime,
+                    context => context.Headers.Set(DiagnosticHeaders.ActivityPropagation, "Link"))
                 .TransitionTo(machine.WaitingForSlot);
         }
 
@@ -739,14 +770,14 @@ namespace MassTransit
                 });
         }
 
-        public static EventActivityBinder<JobSaga, T> PublishJobCanceled<T>(this EventActivityBinder<JobSaga, T> binder, string reason = null)
+        public static EventActivityBinder<JobSaga, T> PublishJobCanceled<T>(this EventActivityBinder<JobSaga, T> binder, Func<T, string> getReason)
             where T : class
         {
             return binder
                 .Then(context =>
                 {
                     context.Saga.Faulted = DateTime.UtcNow;
-                    context.Saga.Reason = string.IsNullOrWhiteSpace(reason) ? JobCancellationReasons.CancellationRequested : reason;
+                    context.Saga.Reason = getReason(context.Message);
                 })
                 .Publish<JobSaga, T, JobCanceled>(context => new JobCanceledEvent
                 {
